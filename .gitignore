@@ -167,4 +167,7 @@ Thumbs.db
 
 # Project specific: large datasets and preprocessed directories
 *.csv
-data/
+data/*
+!data/processed.pkl
+!data/sasrec_model.pt
+!data/model_config.pkl
