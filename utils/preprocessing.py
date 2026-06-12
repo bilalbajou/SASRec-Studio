@@ -5,30 +5,33 @@ import pandas as pd
 def load_dataset(path):
     """
     Charge le dataset (Amazon Electronics ou Datafiniti Amazon).
-    Si le fichier spécifié n'existe pas, tente de trouver un fichier similaire.
+    Si le fichier spécifié n'existe pas, tente de trouver un fichier similaire (y compris avec extension .gz).
     """
     if not os.path.exists(path):
-        directory = os.path.dirname(path) or "."
-        filename = os.path.basename(path)
-        base, ext = os.path.splitext(filename)
-        
-        files = os.listdir(directory)
-        matched_files = []
-        if "Datafiniti" in filename or "Datafiniti" in base:
-            matched_files = [f for f in files if "Datafiniti" in f and f.endswith(ext)]
-        elif "ratings_Electronics" in filename:
-            matched_files = [f for f in files if "ratings_Electronics" in f and f.endswith(ext)]
-            
-        if not matched_files:
-            matched_files = [f for f in files if base in f and f.endswith(ext)]
-            
-        if matched_files:
-            fallback_path = os.path.join(directory, matched_files[0])
-            print(f"[Alerte] Le fichier '{path}' est introuvable. Utilisation du fichier trouvé : '{fallback_path}'")
-            path = fallback_path
+        if not path.endswith('.gz') and os.path.exists(path + '.gz'):
+            path = path + '.gz'
         else:
-            raise FileNotFoundError(f"Le fichier de données '{path}' est introuvable.")
+            directory = os.path.dirname(path) or "."
+            filename = os.path.basename(path)
+            base, ext = os.path.splitext(filename)
             
+            files = os.listdir(directory)
+            matched_files = []
+            if "Datafiniti" in filename or "Datafiniti" in base:
+                matched_files = [f for f in files if "Datafiniti" in f and (f.endswith(ext) or f.endswith(".gz"))]
+            elif "ratings_Electronics" in filename:
+                matched_files = [f for f in files if "ratings_Electronics" in f and (f.endswith(ext) or f.endswith(".gz"))]
+                
+            if not matched_files:
+                matched_files = [f for f in files if base in f and (f.endswith(ext) or f.endswith(".gz"))]
+                
+            if matched_files:
+                fallback_path = os.path.join(directory, matched_files[0])
+                print(f"[Alerte] Le fichier '{path}' est introuvable. Utilisation du fichier trouvé : '{fallback_path}'")
+                path = fallback_path
+            else:
+                raise FileNotFoundError(f"Le fichier de données '{path}' est introuvable.")
+                
     print(f"Chargement du dataset depuis '{path}'...")
     
     # Lecture d'un échantillon pour détecter le format des colonnes

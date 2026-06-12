@@ -71,10 +71,10 @@ with st.sidebar:
 st.markdown('<div class="page-title">Data Preprocessing</div>', unsafe_allow_html=True)
 st.info("This section allows you to load raw interaction datasets, analyze their properties, and configure the k-core filtering pipeline to prepare sequences for SASRec.")
 
-# 1. Scan for CSV files in the workspace
-workspace_csvs = [f for f in os.listdir(".") if f.endswith(".csv")]
+# 1. Scan for CSV and GZ files in the workspace
+workspace_csvs = [f for f in os.listdir(".") if f.endswith(".csv") or f.endswith(".csv.gz")]
 if not workspace_csvs:
-    st.error("No `.csv` files found in the workspace root. Please add your datasets.")
+    st.error("No `.csv` or `.csv.gz` files found in the workspace root. Please add your datasets.")
 else:
     # Let the user select the dataset
     st.subheader("Raw Dataset Selection")
