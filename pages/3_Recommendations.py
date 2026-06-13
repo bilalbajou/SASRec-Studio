@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import pickle
 import pandas as pd
+import numpy as np
 import torch
 import plotly.graph_objects as go
 
@@ -270,99 +271,220 @@ else:
                 
             input_tensor = torch.tensor([padded_seq], dtype=torch.long)
             
-            # Predict scores for all items
+            # Predict scores and extract user final features
             with torch.no_grad():
-                # Shape: (1, num_items + 1)
-                scores = model.predict(input_tensor, item_ids=None).squeeze(0)
+                features = model(input_tensor)
+                final_feat = features[:, -1, :].squeeze(0)
+                scores = torch.matmul(final_feat, model.item_emb.weight.t())
                 
             # Mask padding token 0
-            scores[0] = -float('inf')
+            scores_masked = scores.clone()
+            scores_masked[0] = -float('inf')
             
             # Mask history if in "Existing User" mode
             if mode == "Existing User":
-                scores[sequence_to_recommend] = -float('inf')
+                scores_masked[sequence_to_recommend] = -float('inf')
                 
             # Softmax to get probability distribution
-            probs = torch.softmax(scores, dim=-1)
+            probs = torch.softmax(scores_masked, dim=-1)
             
-            # Extract top 10 valid items (we fetch more and filter out 0/invalid items)
+            # Extract top 10 valid items
             k_fetch = min(20, num_items)
             top_probs, top_indices = torch.topk(probs, k=k_fetch)
             
             rec_pids = []
             rec_scores = []
+            rec_idx_list = []
             
             for idx, prob in zip(top_indices.tolist(), top_probs.tolist()):
                 if idx in id2item and len(rec_pids) < 10:
                     rec_pids.append(id2item[idx])
                     rec_scores.append(prob)
+                    rec_idx_list.append(idx)
                 
-            # Display Recommendations in cards
-            st.markdown("### Top-10 Recommended Products")
+            # Compute detailed calculations
+            user_norm = torch.norm(final_feat, p=2).item()
+            calc_details = []
             
-            col_cards, col_plot = st.columns([1, 1])
-            
-            with col_cards:
-                for rank, (pid, score) in enumerate(zip(rec_pids, rec_scores), 1):
-                    # Progress bar normalized to top recommendation score
-                    normalized_progress = score / rec_scores[0] if rec_scores[0] > 0 else 0.0
-                    
-                    p_title = item2name.get(pid, f"Product {pid}")
-                    st.markdown(f"""
-                    <div class="rec-card" style="padding: 0.8rem 1rem; margin-bottom: 0.8rem;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <div style="display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 15px;">
-                                <span class="rec-rank" style="font-weight: bold; font-size: 1.15rem; color: #A855F7; margin-right: 0.6rem;">#{rank}</span>
-                                <span title="Product ID: {pid}" style="color: #F8FAFC; font-weight: 600; font-size: 1.05rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help;">{p_title}</span>
+            for rank, idx in enumerate(rec_idx_list, 1):
+                pid = id2item[idx]
+                item_name = item2name.get(pid, f"Product {pid}")
+                item_emb = model.item_emb.weight[idx]
+                item_norm = torch.norm(item_emb, p=2).item()
+                raw_score = torch.dot(final_feat, item_emb).item()
+                cosine_sim = raw_score / (user_norm * item_norm) if (user_norm * item_norm) > 0 else 0.0
+                prob = probs[idx].item()
+                
+                calc_details.append({
+                    "Rank": rank,
+                    "Product ID": pid,
+                    "Product Name": item_name,
+                    "Raw Dot Product": raw_score,
+                    "User Vector Norm": user_norm,
+                    "Item Vector Norm": item_norm,
+                    "Cosine Similarity": cosine_sim,
+                    "Softmax Probability": prob
+                })
+
+            # Create tabs for outputs
+            tab_rec, tab_calc = st.tabs(["🎯 Recommendations", "🧮 Calculation Details"])
+
+            with tab_rec:
+                st.markdown("### Top-10 Recommended Products")
+                
+                col_cards, col_plot = st.columns([1, 1])
+                
+                with col_cards:
+                    for rank, (pid, score) in enumerate(zip(rec_pids, rec_scores), 1):
+                        # Progress bar normalized to top recommendation score
+                        normalized_progress = score / rec_scores[0] if rec_scores[0] > 0 else 0.0
+                        
+                        p_title = item2name.get(pid, f"Product {pid}")
+                        st.markdown(f"""
+                        <div class="rec-card" style="padding: 0.8rem 1rem; margin-bottom: 0.8rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 15px;">
+                                    <span class="rec-rank" style="font-weight: bold; font-size: 1.15rem; color: #A855F7; margin-right: 0.6rem;">#{rank}</span>
+                                    <span title="Product ID: {pid}" style="color: #F8FAFC; font-weight: 600; font-size: 1.05rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help;">{p_title}</span>
+                                </div>
+                                <span class="rec-score" style="font-weight: bold; color: #06B6D4; white-space: nowrap;">Score: {score:.5f}</span>
                             </div>
-                            <span class="rec-score" style="font-weight: bold; color: #06B6D4; white-space: nowrap;">Score: {score:.5f}</span>
                         </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(normalized_progress)
-                    
-            with col_plot:
-                # Plotly Bar Chart
-                x_labels = [item2name.get(pid, pid)[:15] + "..." if len(item2name.get(pid, pid)) > 15 else item2name.get(pid, pid) for pid in rec_pids]
-                fig = go.Figure(data=[
-                    go.Bar(
-                        x=x_labels,
-                        y=rec_scores,
-                        hovertext=[f"ID: {pid}<br>{item2name.get(pid, pid)}" for pid in rec_pids],
-                        marker=dict(
-                            color=rec_scores,
-                            colorscale='Viridis'
-                        ),
-                        text=[f"{s:.5f}" for s in rec_scores],
-                        textposition='outside'
+                        """, unsafe_allow_html=True)
+                        st.progress(normalized_progress)
+                        
+                with col_plot:
+                    # Plotly Bar Chart
+                    x_labels = [item2name.get(pid, pid)[:15] + "..." if len(item2name.get(pid, pid)) > 15 else item2name.get(pid, pid) for pid in rec_pids]
+                    fig = go.Figure(data=[
+                        go.Bar(
+                            x=x_labels,
+                            y=rec_scores,
+                            hovertext=[f"ID: {pid}<br>{item2name.get(pid, pid)}" for pid in rec_pids],
+                            marker=dict(
+                                color=rec_scores,
+                                colorscale='Viridis'
+                            ),
+                            text=[f"{s:.5f}" for s in rec_scores],
+                            textposition='outside'
+                        )
+                    ])
+                    fig.update_layout(
+                        title="Distribution of Top-10 Scores",
+                        template="plotly_dark",
+                        xaxis_title="Product",
+                        yaxis_title="Softmax Probability",
+                        margin=dict(l=10, r=10, t=50, b=10),
+                        height=450
                     )
-                ])
-                fig.update_layout(
-                    title="Distribution of Top-10 Scores",
-                    template="plotly_dark",
-                    xaxis_title="Product",
-                    yaxis_title="Softmax Probability",
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    height=450
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Export Button CSV
+                    export_data = {
+                        "Rank": list(range(1, len(rec_pids) + 1)),
+                        "Product ID": rec_pids
+                    }
+                    if any(pid in item2name for pid in rec_pids):
+                        export_data["Product Name"] = [item2name.get(pid, "") for pid in rec_pids]
+                    export_data["Similarity Score"] = rec_scores
+                    export_df = pd.DataFrame(export_data)
+                    
+                    csv_data = export_df.to_csv(index=False).encode('utf-8')
+                    
+                    st.download_button(
+                        label="Export Recommendations (CSV)",
+                        data=csv_data,
+                        file_name=f"recommendations_user_{selected_user}.csv" if mode == "Existing User" else "recommendations_manual.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+
+            with tab_calc:
+                st.markdown("### 🧮 Recommendation Formula & Logic")
                 
-                # Export Button CSV
-                export_data = {
-                    "Rank": list(range(1, len(rec_pids) + 1)),
-                    "Product ID": rec_pids
-                }
-                if any(pid in item2name for pid in rec_pids):
-                    export_data["Product Name"] = [item2name.get(pid, "") for pid in rec_pids]
-                export_data["Similarity Score"] = rec_scores
-                export_df = pd.DataFrame(export_data)
+                # LaTeX Equations
+                st.write("The recommendation score is calculated via the **Dot Product** between the User context vector and the Candidate Item embedding:")
+                st.latex(r"Score_i = \mathbf{f}_{\text{user}} \cdot \mathbf{e}_{i} = \sum_{d=1}^{D} f_{\text{user}, d} \times e_{i, d}")
                 
-                csv_data = export_df.to_csv(index=False).encode('utf-8')
+                st.write("To understand alignment independently of magnitude, the **Cosine Similarity** is calculated:")
+                st.latex(r"\text{Cosine Similarity}_i = \frac{\mathbf{f}_{\text{user}} \cdot \mathbf{e}_{i}}{\|\mathbf{f}_{\text{user}}\|_2 \times \|\mathbf{e}_{i}\|_2}")
                 
-                st.download_button(
-                    label="Export Recommendations (CSV)",
-                    data=csv_data,
-                    file_name=f"recommendations_user_{selected_user}.csv" if mode == "Existing User" else "recommendations_manual.csv",
-                    mime="text/csv",
+                st.write("Finally, scores are normalized using **Softmax** over the item catalog (excluding purchase history):")
+                st.latex(r"P(i) = \frac{\exp(Score_i)}{\sum_{j \notin \text{history}} \exp(Score_j)}")
+                
+                # Detailed calculation table
+                st.markdown("### 📊 Metrics Table")
+                calc_df = pd.DataFrame(calc_details)
+                st.dataframe(
+                    calc_df.style.format({
+                        "Raw Dot Product": "{:.4f}",
+                        "User Vector Norm": "{:.4f}",
+                        "Item Vector Norm": "{:.4f}",
+                        "Cosine Similarity": "{:.4f}",
+                        "Softmax Probability": "{:.6f}"
+                    }),
                     use_container_width=True
                 )
+                
+                # Embedding alignment heatmap
+                st.markdown("### 🧠 Latent Dimension Alignment Heatmap")
+                st.write("This heatmap shows values along the latent dimensions of the user profile vector and the recommended products. Overlap in red (positive) or blue (negative) zones indicates constructive alignment.")
+                
+                heatmap_data = [final_feat.cpu().numpy()]
+                heatmap_labels = ["User Profile (f_user)"]
+                
+                for pid in rec_pids:
+                    idx = item2id[pid]
+                    item_emb = model.item_emb.weight[idx].detach().cpu().numpy()
+                    heatmap_data.append(item_emb)
+                    trunc_name = item2name.get(pid, pid)[:20] + "..." if len(item2name.get(pid, pid)) > 20 else item2name.get(pid, pid)
+                    heatmap_labels.append(f"#{len(heatmap_labels)}: {trunc_name}")
+                    
+                heatmap_matrix = np.array(heatmap_data)
+                
+                fig_heat = go.Figure(data=go.Heatmap(
+                    z=heatmap_matrix,
+                    x=[f"Dim {i}" for i in range(heatmap_matrix.shape[1])],
+                    y=heatmap_labels,
+                    colorscale='RdBu',
+                    zmin=-2.0,
+                    zmax=2.0,
+                    colorbar=dict(title="Embedding Value")
+                ))
+                fig_heat.update_layout(
+                    title="Latent Space Comparison (User vs. Candidates)",
+                    template="plotly_dark",
+                    height=450,
+                    margin=dict(l=10, r=10, t=50, b=10)
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
+                
+                # Dimension-wise contributions for top recommendation
+                top_1_idx = rec_idx_list[0]
+                top_1_pid = id2item[top_1_idx]
+                top_1_name = item2name.get(top_1_pid, top_1_pid)
+                top_1_emb = model.item_emb.weight[top_1_idx]
+                contributions = (final_feat * top_1_emb).detach().cpu().numpy()
+                
+                st.markdown(f"### 🎯 Dimension Contribution to #1 Recommendation")
+                st.write(f"Contribution breakdown per embedding dimension for **{top_1_name}**. Positive values directly increase the dot product score.")
+                
+                fig_contrib = go.Figure(data=[
+                    go.Bar(
+                        x=[f"Dim {i}" for i in range(len(contributions))],
+                        y=contributions,
+                        marker=dict(
+                            color=['#10B981' if c >= 0 else '#EF4444' for c in contributions]
+                        ),
+                        hovertext=[f"Value: {c:.4f}" for c in contributions]
+                    )
+                ])
+                fig_contrib.update_layout(
+                    title=f"Dimension-wise Dot Product Contributions (f_user * e_item)",
+                    template="plotly_dark",
+                    xaxis_title="Latent Dimension",
+                    yaxis_title="Contribution (f_user_d * e_item_d)",
+                    height=350,
+                    margin=dict(l=10, r=10, t=50, b=10)
+                )
+                st.plotly_chart(fig_contrib, use_container_width=True)
